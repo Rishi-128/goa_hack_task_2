@@ -107,13 +107,13 @@ class Settings:
     )
     reranker_max_length: int = field(default_factory=lambda: _env_int("RERANKER_MAX_LENGTH", 512))
 
-    # ── LLM (Ultra-Fast 7B Model on Groq LPUs) ──────────────────────
+    # ── LLM (Groq LPUs) ─────────────────────────────────────────────
     llm_provider: str = field(default_factory=lambda: _env("LLM_PROVIDER", "groq"))
     llm_model: str = field(
-        default_factory=lambda: _env("LLM_MODEL", "allam-2-7b")
+        default_factory=lambda: _env("LLM_MODEL", "openai/gpt-oss-120b")
     )
     llm_temperature: float = field(default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.0))
-    llm_max_tokens: int = field(default_factory=lambda: _env_int("LLM_MAX_TOKENS", 75))
+    llm_max_tokens: int = field(default_factory=lambda: _env_int("LLM_MAX_TOKENS", 350))
 
     # ── Query Processing ────────────────────────────────────────────
     default_query_mode: str = field(

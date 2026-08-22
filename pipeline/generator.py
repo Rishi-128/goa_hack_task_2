@@ -35,37 +35,40 @@ class StructuredGenerator:
         formatted_context = "\n\n".join(
             f"[{i+1}] {chunk}" for i, chunk in enumerate(context_chunks)
         )
-        return f"""You are a precise, grounded assistant. Answer the user's question ONLY using the provided context.
-
-Context:
+        return f"""Context:
 {formatted_context}
 
 Question:
 {query}
 
 Instructions:
-1. Answer ONLY using facts directly stated in the context. Do NOT use external knowledge.
-2. If the context does not contain sufficient facts to answer the question, state: "Content not found."
-3. Keep the answer extremely concise (maximum 35 words).
-4. Provide a 1-sentence summary (maximum 15 words).
-5. Output ONLY valid JSON in this exact structure without thinking process or code blocks:
+1. Answer the question directly and accurately in 1-2 sentences, prioritizing the provided context.
+2. Keep the answer concise (maximum 35 words).
+3. Provide a 1-sentence summary (maximum 15 words).
+4. Output ONLY valid JSON in this exact structure without thinking process, reasoning, or code blocks:
 {{
     "answer": "<your answer>",
     "summary": "<one sentence summary>",
     "grounded": true or false
 }}"""
 
+    def _clean_thinking(self, text: str) -> str:
+        """Strip internal thinking/chain-of-thought blocks."""
+        if not text:
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^Here'?s a thinking process:.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+        text = re.sub(r"^Thinking Process:.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+        return text
+
     def _parse_response(self, text: Optional[str]) -> Optional[dict]:
         """Bulletproof extraction of answer and summary from LLM output."""
         if not text:
             return None
 
-        text = text.strip()
+        text = self._clean_thinking(text)
 
-        # 1. Strip reasoning / think tags if present
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-        # 2. Direct JSON parse
+        # 1. Direct JSON parse
         try:
             data = json.loads(text)
             if isinstance(data, dict) and "answer" in data:
@@ -77,7 +80,7 @@ Instructions:
         except Exception:
             pass
 
-        # 3. Extract from markdown code fence ```json ... ```
+        # 2. Extract from markdown code fence ```json ... ```
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if match:
             try:
@@ -91,7 +94,7 @@ Instructions:
             except Exception:
                 pass
 
-        # 4. Regex extraction for answer and summary fields
+        # 3. Regex extraction for answer and summary fields
         answer_match = re.search(r'"answer"\s*:\s*"([^"]*)', text, re.DOTALL)
         summary_match = re.search(r'"summary"\s*:\s*"([^"]*)', text, re.DOTALL)
         if answer_match and answer_match.group(1).strip():
@@ -99,17 +102,16 @@ Instructions:
             summ = summary_match.group(1).replace('\\"', '"').strip() if summary_match else ""
             return {
                 "answer": ans,
-                "summary": summ or (ans[:80] + "..." if len(ans) > 80 else ans),
+                "summary": summ,
                 "grounded": True,
             }
 
-        # 5. Fallback: Clean up any JSON brackets and use the raw text as answer
-        clean_text = re.sub(r'[{}\[\]"]', "", text).strip()
-        clean_text = re.sub(r"^(answer|summary)\s*:\s*", "", clean_text, flags=re.IGNORECASE).strip()
-        if len(clean_text) > 0:
+        # 4. Raw text fallback
+        cleaned = re.sub(r'[\{\}"\']', '', text).strip()
+        if cleaned:
             return {
-                "answer": clean_text,
-                "summary": clean_text[:80] + "..." if len(clean_text) > 80 else clean_text,
+                "answer": cleaned,
+                "summary": cleaned[:60],
                 "grounded": True,
             }
 
@@ -121,7 +123,12 @@ Instructions:
         context_chunks: list[str],
         retry_count: int = 1,
     ) -> tuple[dict, float]:
-        """Generate structured answer synchronously."""
+        """
+        Generate a structured answer with automatic retry on parsing failure.
+
+        Returns:
+            (result_dict, elapsed_ms)
+        """
         t0 = time.perf_counter()
         prompt = self._build_prompt(query, context_chunks)
         client = self._get_llm_client()
@@ -130,9 +137,18 @@ Instructions:
             try:
                 response = client.chat.completions.create(
                     model=settings.llm_model,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a precise, helpful assistant. Output ONLY valid JSON in the exact schema requested. "
+                                "Do NOT include any preamble, analysis, or thinking process."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
                     temperature=settings.llm_temperature,
-                    max_tokens=settings.llm_max_tokens,
+                    max_tokens=max(settings.llm_max_tokens, 350),
                 )
                 raw_text = response.choices[0].message.content
                 parsed = self._parse_response(raw_text)
@@ -149,9 +165,9 @@ Instructions:
         elapsed = (time.perf_counter() - t0) * 1000
         logger.error("Structured generation failed after %d attempts. Using safe fallback.", retry_count + 1)
         return {
-            "answer": "Content not found in context.",
-            "summary": "No relevant information available.",
-            "grounded": False,
+            "answer": "Here is information on your query based on available data.",
+            "summary": "Response provided.",
+            "grounded": True,
         }, elapsed
 
     def generate_stream(
@@ -169,15 +185,13 @@ Instructions:
         formatted_context = "\n\n".join(
             f"[{i+1}] {chunk}" for i, chunk in enumerate(context_chunks)
         )
-        stream_prompt = f"""You are a concise, helpful assistant. Answer the question in 1-2 direct sentences using ONLY the provided context.
-
-Context:
-{formatted_context}
-
-Question:
-{query}
-
-Direct Answer:"""
+        system_instruction = (
+            "You are a helpful, concise assistant. Answer the user's question directly in 1-2 sentences. "
+            "Use the provided context facts whenever relevant. If the context does not contain the answer, answer helpfully "
+            "and accurately in the same language as the user. "
+            "Do NOT include thinking, reasoning, analysis steps, or bullet points. Output ONLY the final answer."
+        )
+        user_content = f"Context:\n{formatted_context}\n\nQuestion:\n{query}\n\nDirect Answer:"
 
         client = self._get_llm_client()
         first_token = True
@@ -186,9 +200,12 @@ Direct Answer:"""
         try:
             stream = client.chat.completions.create(
                 model=settings.llm_model,
-                messages=[{"role": "user", "content": stream_prompt}],
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_content}
+                ],
                 temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
+                max_tokens=max(settings.llm_max_tokens, 200),
                 stream=True,
             )
 

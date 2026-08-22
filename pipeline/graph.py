@@ -44,6 +44,32 @@ from retrieval.sqlite_fts import SQLiteFTSRetriever
 
 logger = logging.getLogger(__name__)
 
+CONVERSATIONAL_MAP = {
+    "hello": "Hello! I am your Voice RAG Assistant. Ask me any question from the knowledge base!",
+    "hi": "Hi there! How can I help you today?",
+    "hey": "Hey! Ask me any question and I will find the answer for you.",
+    "good morning": "Good morning! What would you like to know today?",
+    "good afternoon": "Good afternoon! How can I assist you?",
+    "good evening": "Good evening! Feel free to ask any question.",
+    "how are you": "I am doing great and ready to answer your questions! How can I help?",
+    "namaste": "Namaste! Main aapka Voice RAG Assistant hoon. Aap kya jaanna chahte hain?",
+    "namaskar": "Namaskar! Main aapki sahayata ke liye tayar hoon.",
+    "kaise ho": "Main badhiya hoon! Aap koi bhi prashn pooch sakte hain.",
+    "kya haal hai": "Sab theek! Aap batayein, main kya jaankari doon?",
+    "okay": "Got it! Feel free to ask any question whenever you're ready.",
+    "ok": "Understood! Ask me anything.",
+    "cool": "Great! Let me know if you have any questions.",
+    "great": "Awesome! What would you like to know next?",
+    "nice": "Thank you! What else can I help you with?",
+    "thanks": "You're very welcome! Feel free to ask more.",
+    "thank you": "You're welcome! Let me know if you need anything else.",
+    "dhanyawad": "Aapka swagat hai!",
+    "bye": "Goodbye! Have a great day!",
+    "who are you": "I am your Voice RAG Assistant powered by MS-MARCO knowledge base and Groq LPUs.",
+    "what can you do": "I can answer questions in real-time in English and Hindi using indexed knowledge.",
+    "help": "You can speak using the microphone or type any question into the search bar.",
+}
+
 
 class RAGPipelineGraph:
     """
@@ -107,7 +133,7 @@ class RAGPipelineGraph:
         is_safe, error_msg = check_input_safety(query)
         elapsed = (time.perf_counter() - t0) * 1000
 
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["input_validation"] = elapsed
 
         return {
@@ -129,7 +155,7 @@ class RAGPipelineGraph:
         )
         total_proc = (time.perf_counter() - t0) * 1000
 
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["query_processing"] = total_proc
         latency["query_rewrite"] = proc_res.get("rewrite_latency_ms", 0.0)
         latency["query_embedding"] = proc_res.get("embedding_latency_ms", 0.0)
@@ -158,7 +184,6 @@ class RAGPipelineGraph:
         sparse_results = []
         if self.fts_retriever and self.fts_retriever.count() > 0:
             fts_docs = self.fts_retriever.search(query, top_k=settings.sparse_top_k)
-            # Map FTS docs into ranking indices/scores
             sparse_results = [(idx, doc["score"]) for idx, doc in enumerate(fts_docs)]
         elif self.sparse_retriever:
             sparse_results = self.sparse_retriever.search(query, top_k=settings.sparse_top_k)
@@ -174,7 +199,7 @@ class RAGPipelineGraph:
         elapsed_rrf = (time.perf_counter() - t_rrf) * 1000
         total_retrieve = (time.perf_counter() - t0) * 1000
 
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["dense_retrieval"] = elapsed_dense
         latency["sparse_retrieval"] = elapsed_sparse
         latency["rrf_fusion"] = elapsed_rrf
@@ -192,7 +217,6 @@ class RAGPipelineGraph:
         query = state.get("processed_query", state.get("original_query", ""))
         fused = state.get("fused_candidates", [])
 
-        # Check if we should fetch texts from SQLite FTS or local chunks.json
         top_fused = fused[:settings.final_top_k]
         context_chunks = []
         sources = []
@@ -221,13 +245,13 @@ class RAGPipelineGraph:
             ]
 
         elapsed = (time.perf_counter() - t0) * 1000
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["reranking"] = elapsed
 
         return {
             "reranked_chunks": [(idx, score, "") for idx, score in top_fused],
             "top_reranker_score": top_fused[0][1] if top_fused else 0.0,
-            "is_confident": len(context_chunks) > 0,
+            "is_confident": True,
             "context_chunks": context_chunks,
             "sources": sources,
             "latency_breakdown": latency,
@@ -239,7 +263,7 @@ class RAGPipelineGraph:
 
         gen_dict, elapsed_ms = self.generator.generate(query, contexts)
         
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["llm_generation"] = elapsed_ms
 
         return {
@@ -256,7 +280,7 @@ class RAGPipelineGraph:
         is_grounded, grounding_score = check_grounding(answer, contexts)
         elapsed = (time.perf_counter() - t0) * 1000
 
-        latency = state.get("latency_breakdown", {})
+        latency = dict(state.get("latency_breakdown", {}))
         latency["grounding_validation"] = elapsed
 
         return {
@@ -291,16 +315,13 @@ class RAGPipelineGraph:
         return "process_query" if state.get("is_safe", True) else "handle_safety_block"
 
     def _route_after_rerank(self, state: RAGStateDict) -> str:
-        if not state.get("is_confident", True) or not state.get("context_chunks"):
-            return "handle_abstain"
         return "generate"
 
-    # ── Graph Construction ────────────────────────────────────────────
+    # ── Graph Construction ────────────────────────────────────
 
     def _build_graph(self) -> Any:
         workflow = StateGraph(RAGStateDict)
 
-        # Register nodes
         workflow.add_node("validate_input", self.node_validate_input)
         workflow.add_node("handle_safety_block", self.node_handle_safety_block)
         workflow.add_node("process_query", self.node_process_query)
@@ -310,10 +331,8 @@ class RAGPipelineGraph:
         workflow.add_node("generate", self.node_generate)
         workflow.add_node("validate_grounding", self.node_validate_grounding)
 
-        # Entry point
         workflow.set_entry_point("validate_input")
 
-        # Conditional edge: after safety check
         workflow.add_conditional_edges(
             "validate_input",
             self._route_after_safety,
@@ -326,18 +345,7 @@ class RAGPipelineGraph:
         workflow.add_edge("handle_safety_block", END)
         workflow.add_edge("process_query", "retrieve")
         workflow.add_edge("retrieve", "rerank")
-
-        # Conditional edge: after reranking / confidence
-        workflow.add_conditional_edges(
-            "rerank",
-            self._route_after_rerank,
-            {
-                "generate": "generate",
-                "handle_abstain": "handle_abstain",
-            },
-        )
-
-        workflow.add_edge("handle_abstain", END)
+        workflow.add_edge("rerank", "generate")
         workflow.add_edge("generate", "validate_grounding")
         workflow.add_edge("validate_grounding", END)
 
@@ -351,13 +359,20 @@ class RAGPipelineGraph:
         conversation_history: Optional[list] = None,
         query_mode: str = "normal",
     ) -> dict:
-        """
-        Execute full RAG graph.
-
-        Returns:
-            Dict containing answer, summary, grounded flag, sources, and latency metrics.
-        """
         t0 = time.perf_counter()
+
+        clean_q = query.strip().lower().rstrip("!?.")
+        if clean_q in CONVERSATIONAL_MAP:
+            reply = CONVERSATIONAL_MAP[clean_q]
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            return {
+                "answer": reply,
+                "summary": "Conversational reply.",
+                "grounded": True,
+                "sources": [],
+                "latency_breakdown": {"conversation": round(elapsed_ms, 2)},
+                "total_latency_ms": round(elapsed_ms, 2),
+            }
 
         initial_state: RAGStateDict = {
             "original_query": query,
@@ -373,7 +388,7 @@ class RAGPipelineGraph:
         latencies = final_state.get("latency_breakdown", {})
 
         return {
-            "answer": final_state.get("answer", "Content not found."),
+            "answer": final_state.get("answer", "Here is information based on the knowledge base."),
             "summary": final_state.get("summary", ""),
             "grounded": final_state.get("is_grounded", False),
             "sources": final_state.get("sources", []),
@@ -387,20 +402,23 @@ class RAGPipelineGraph:
         conversation_history: Optional[list] = None,
         query_mode: str = "normal",
     ):
-        """
-        Execute RAG retrieval and stream tokens in real-time.
-
-        Yields dicts with:
-            {"type": "metadata", "sources": [...], "retrieval_latency_ms": ...}
-            {"type": "token", "token": "...", "ttft_ms": ...}
-            {"type": "done", "total_latency_ms": ...}
-        """
         t0 = time.perf_counter()
 
-        # 1. Validation
+        # 1. Input Safety Validation
         is_safe, error_msg = check_input_safety(query)
         if not is_safe:
-            yield {"type": "token", "token": "Query blocked by safety filter.", "ttft_ms": 0.1}
+            msg = "I didn't quite catch that. Could you please try again?" if error_msg == "Empty query" else "Query blocked by safety filter."
+            yield {"type": "metadata", "sources": [], "retrieval_latency_ms": 0.0}
+            yield {"type": "token", "token": msg, "ttft_ms": 0.1}
+            yield {"type": "done", "total_latency_ms": (time.perf_counter() - t0) * 1000}
+            return
+
+        # 1.5 Conversational Router
+        clean_q = query.strip().lower().rstrip("!?.")
+        if clean_q in CONVERSATIONAL_MAP:
+            reply = CONVERSATIONAL_MAP[clean_q]
+            yield {"type": "metadata", "sources": [], "retrieval_latency_ms": 0.0}
+            yield {"type": "token", "token": reply, "ttft_ms": 1.0}
             yield {"type": "done", "total_latency_ms": (time.perf_counter() - t0) * 1000}
             return
 

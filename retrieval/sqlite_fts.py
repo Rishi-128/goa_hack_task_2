@@ -1,10 +1,9 @@
 """
-SQLite FTS5 Full-Text Search (BM25) Retriever
+SQLite FTS5 Full-Text Search BM25 Retriever
 
 PURPOSE:
-    Provides disk-backed, sub-10ms BM25 lexical search over 23M+ passages
-    using SQLite's native C-based FTS5 (Full-Text Search 5) engine with
-    stop-word filtering and memory mapping.
+    Provides sub-10ms disk-backed BM25 keyword search across millions of passages in SQLite.
+    Includes smart AND-first search, passage deduplication, and memory-mapped connection pooling.
 """
 
 import logging
@@ -15,48 +14,44 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
-# Common English stop words to prevent generic token matches
+# Stop words and question/filler words to exclude from strict AND matching
 STOP_WORDS = {
-    "what", "is", "a", "an", "the", "and", "or", "of", "to", "in", "for",
-    "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
-    "are", "was", "were", "be", "been", "being", "have", "has", "had", "do",
-    "does", "did", "how", "why", "where", "when", "which", "who", "whom",
-    "this", "that", "these", "those", "it", "its", "you", "your", "we", "our",
-    "they", "their", "he", "she", "his", "her", "tell", "me", "can", "could",
-    "would", "should", "will", "shall", "give", "define", "meaning", "definition"
+    "a", "an", "the", "in", "on", "at", "of", "to", "for", "with",
+    "is", "was", "are", "were", "be", "been", "being",
+    "by", "into", "through", "during", "from", "and", "or", "but",
+    "what", "why", "how", "when", "where", "who", "whom", "which",
+    "tell", "me", "about", "can", "you", "does", "do", "did", "please",
+    "define", "explain", "describe", "its", "their", "have", "has", "had",
+    "give", "name", "list", "show",
 }
 
 
 class SQLiteFTSRetriever:
     """
-    Disk-backed Full-Text Search retriever powered by SQLite FTS5.
-    
-    Features:
-      - Scales to 23M+ rows with low RAM footprint (<50 MB)
-      - Native C-engine BM25 ranking
-      - Stop-word filtering for precise keyword matching
-      - Memory-mapped I/O (mmap) for ~5–10 ms search latency
+    Disk-backed SQLite FTS5 BM25 retriever with smart token filtering and passage deduplication.
     """
 
-    def __init__(self, db_path: Optional[str | Path] = None):
-        if db_path is None:
-            db_path = Path(__file__).resolve().parent.parent / "data" / "msmarco_full.db"
-        
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: Optional[Path] = None):
+        self.db_path = Path(db_path or (settings.project_root / "data" / "msmarco_full.db"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._cached_count = None
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Create an optimized SQLite connection with WAL mode, busy timeout, and memory mapping."""
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
+        """Create an optimized connection with WAL mode and memory mapping."""
+        conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=30.0,
+            check_same_thread=False,
+        )
         conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
         conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA cache_size = -64000;")   # 64 MB RAM cache
         conn.execute("PRAGMA mmap_size = 268435456;")  # 256 MB memory-mapped I/O
+        conn.execute("PRAGMA cache_size = -64000;")     # 64 MB RAM cache
         conn.execute("PRAGMA temp_store = MEMORY;")
         return conn
 
@@ -96,11 +91,9 @@ class SQLiteFTSRetriever:
         if self._cached_count is not None:
             return self._cached_count
         
-        # If DB file is large, estimate based on size or fast fetch
         if self.db_path.exists():
             size_mb = os.path.getsize(self.db_path) / (1024 * 1024)
             if size_mb > 100:
-                # Fast estimate ~1,000 passages per MB
                 self._cached_count = int(size_mb * 1000)
                 return self._cached_count
 
@@ -113,63 +106,94 @@ class SQLiteFTSRetriever:
         finally:
             conn.close()
 
-    def _clean_query_for_fts(self, query: str) -> str:
-        """Clean query terms and filter generic stop words for high-precision FTS matching."""
-        clean = re.sub(r'["\'\*\^\:\(\)\-\+\{\}\?\!\.\,\;\:]', ' ', query)
-        raw_tokens = [t.strip().lower() for t in clean.split() if len(t.strip()) > 1]
-        
-        if not raw_tokens:
-            return ""
-
-        # Filter out common stop words to prevent matching every generic document
-        content_tokens = [t for t in raw_tokens if t not in STOP_WORDS]
-        
-        # If all tokens were stop words, fall back to raw tokens
-        tokens_to_use = content_tokens if content_tokens else raw_tokens
-        
-        # Format as SQLite FTS5 query: phrase AND term OR term
-        return " OR ".join(tokens_to_use)
+    def _clean_tokens(self, query: str) -> list[str]:
+        """Extract clean alphanumeric query terms."""
+        clean = re.sub(r'["\'\*\^\:\(\)\-\+\{\}\?\!\.\,\;\:\/\\]', ' ', query)
+        tokens = [t.strip().lower() for t in clean.split() if len(t.strip()) > 1]
+        return tokens
 
     def search(self, query: str, top_k: int = 15) -> list[dict]:
         """
-        Search for top-K matching passages using SQLite FTS5 native BM25 ranking.
+        Search for top-K unique matching passages using smart AND-first search and BM25 ranking.
 
         Returns:
             List of dicts: [{"passage_id": str, "text": str, "score": float, "chunk_id": str}, ...]
         """
         t0 = time.perf_counter()
-        match_query = self._clean_query_for_fts(query)
-        
-        if not match_query:
+        raw_tokens = self._clean_tokens(query)
+        if not raw_tokens:
             return []
+
+        # Content tokens (excluding filler / question words)
+        content_tokens = [t for t in raw_tokens if t not in STOP_WORDS]
+        tokens_to_use = content_tokens if content_tokens else raw_tokens
 
         conn = self._get_connection()
         results = []
+        seen_pids = set()
+        seen_texts = set()
+
         try:
+            # 1. Try high-precision AND query first (all salient terms must match)
+            and_query = " AND ".join(f'"{t}"' for t in tokens_to_use)
             cursor = conn.execute(
                 """
                 SELECT passage_id, text, -bm25(msmarco_fts) as rank_score
                 FROM msmarco_fts
                 WHERE msmarco_fts MATCH ?
                 ORDER BY rank_score DESC
-                LIMIT ?;
+                LIMIT 50;
                 """,
-                (match_query, top_k),
+                (and_query,),
             )
-
             for row in cursor.fetchall():
                 pid, text, score = row[0], row[1], float(row[2])
-                results.append({
-                    "passage_id": pid,
-                    "chunk_id": f"{pid}_chunk_0",
-                    "text": text,
-                    "score": round(score, 4),
-                })
+                text_key = text[:100].strip().lower()
+                if pid not in seen_pids and text_key not in seen_texts:
+                    seen_pids.add(pid)
+                    seen_texts.add(text_key)
+                    results.append({
+                        "passage_id": pid,
+                        "chunk_id": f"{pid}_chunk_0",
+                        "text": text,
+                        "score": round(score, 4),
+                    })
+                if len(results) >= top_k:
+                    break
+
+            # 2. If AND query didn't find enough, fallback to OR query
+            if len(results) < top_k:
+                or_query = " OR ".join(f'"{t}"' for t in tokens_to_use)
+                cursor = conn.execute(
+                    """
+                    SELECT passage_id, text, -bm25(msmarco_fts) as rank_score
+                    FROM msmarco_fts
+                    WHERE msmarco_fts MATCH ?
+                    ORDER BY rank_score DESC
+                    LIMIT 50;
+                    """,
+                    (or_query,),
+                )
+                for row in cursor.fetchall():
+                    pid, text, score = row[0], row[1], float(row[2])
+                    text_key = text[:100].strip().lower()
+                    if pid not in seen_pids and text_key not in seen_texts:
+                        seen_pids.add(pid)
+                        seen_texts.add(text_key)
+                        results.append({
+                            "passage_id": pid,
+                            "chunk_id": f"{pid}_chunk_0",
+                            "text": text,
+                            "score": round(score, 4),
+                        })
+                    if len(results) >= top_k:
+                        break
+
         except Exception as e:
             logger.warning("FTS search error on query %r: %s", query, e)
         finally:
             conn.close()
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        logger.debug("SQLite FTS5 searched in %.2f ms (found %d docs)", elapsed_ms, len(results))
+        logger.debug("SQLite FTS5 searched in %.2f ms (found %d unique docs)", elapsed_ms, len(results))
         return results

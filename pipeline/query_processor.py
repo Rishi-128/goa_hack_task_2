@@ -6,13 +6,6 @@ PURPOSE:
     1. Conditional query rewriting (skips LLM call when query is already self-contained)
     2. Optional HyDE (Hypothetical Document Embeddings) generation
     3. Query embedding generation
-
-WHY CONDITIONAL REWRITING IS ESSENTIAL:
-    - Calling an LLM to rewrite EVERY query adds 300-600 ms of pure overhead.
-    - For standalone questions ("what is a corporation?"), rewrite is completely redundant.
-    - We check: Is conversation history non-empty? Are there unresolved pronouns ("it", "they", "its", etc.)?
-    - If NO -> bypass LLM rewrite (saves ~400ms, essential for < 200ms target).
-    - If YES -> run LLM rewrite (preserving the prompt from rag_core.py).
 """
 
 import logging
@@ -27,7 +20,6 @@ from ingestion.embeddings import EmbeddingGenerator
 
 logger = logging.getLogger(__name__)
 
-# Patterns indicating unresolved conversational references / pronouns
 PRONOUN_PATTERN = re.compile(
     r"\b(it|its|they|them|their|theirs|he|him|his|she|her|hers|this|that|these|those|the former|the latter)\b",
     re.IGNORECASE,
@@ -59,19 +51,13 @@ class QueryProcessor:
     def needs_rewrite(self, query: str, conversation_history: list) -> bool:
         """
         Heuristic check: does the query need context-dependent rewriting?
-        
-        Returns True if:
-        1. There is active conversation history AND
-        2. Query contains pronouns or references that indicate context dependency, OR is very short (< 4 words)
         """
         if not conversation_history:
             return False
 
-        # If history exists and query has pronouns/anaphora
         if PRONOUN_PATTERN.search(query):
             return True
 
-        # Short follow-ups like "why?", "how much?", "and then?"
         if len(query.split()) <= 3:
             return True
 
@@ -80,10 +66,6 @@ class QueryProcessor:
     def rewrite_query(self, query: str, conversation_history: list) -> tuple[str, float]:
         """
         Rewrite query into a standalone question using conversation history.
-        Uses exact prompt logic from original rag_core.py.
-        
-        Returns:
-            (rewritten_query, elapsed_ms)
         """
         t0 = time.perf_counter()
         prompt = f"""Conversation History:
@@ -93,7 +75,7 @@ Current User Question:
 {query}
 
 Rewrite the question into a standalone, fully self-contained query.
-Do NOT answer the question.
+Do NOT answer the question. Output ONLY the rewritten question.
 If no rewrite is needed, return the original query."""
 
         try:
@@ -102,11 +84,33 @@ If no rewrite is needed, return the original query."""
                 model=settings.llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=50,
+                max_tokens=60,
             )
-
+            rewritten = response.choices[0].message.content.strip()
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            return (rewritten if rewritten else query), elapsed_ms
         except Exception as e:
-            logger.warning("HyDE generation failed (%s), falling back to query", e)
+            logger.warning("Query rewrite failed (%s), using original", e)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            return query, elapsed_ms
+
+    def generate_hyde_document(self, query: str) -> tuple[str, float]:
+        """Generate hypothetical document for dense embedding search."""
+        t0 = time.perf_counter()
+        prompt = f"Please write a short passage that directly answers the question: {query}"
+        try:
+            client = self._get_llm_client()
+            response = client.chat.completions.create(
+                model=settings.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=100,
+            )
+            hyde_doc = response.choices[0].message.content.strip()
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            return hyde_doc or query, elapsed_ms
+        except Exception as e:
+            logger.warning("HyDE generation failed (%s)", e)
             elapsed_ms = (time.perf_counter() - t0) * 1000
             return query, elapsed_ms
 
@@ -116,20 +120,6 @@ If no rewrite is needed, return the original query."""
         conversation_history: list,
         query_mode: str = "normal",
     ) -> dict:
-        """
-        Full query processing step:
-        1. Condition-checked rewriting
-        2. Optional HyDE
-        3. Embedding generation
-        
-        Returns dict with:
-            - processed_query: str
-            - embedding_text: str (text used for embedding)
-            - query_embedding: np.ndarray
-            - rewrite_latency_ms: float
-            - hyde_latency_ms: float
-            - embedding_latency_ms: float
-        """
         rewrite_latency_ms = 0.0
         hyde_latency_ms = 0.0
         processed_query = query

@@ -139,6 +139,12 @@ def check_grounding(
 
 def create_safety_block_response(reason: str = "safety_filter") -> dict:
     """Controlled response for blocked inputs."""
+    if reason == "Empty query":
+        return {
+            "answer": "I didn't quite catch that. Could you please try again?",
+            "summary": "Audio was not recognized.",
+            "grounded": True,
+        }
     return {
         "answer": "I cannot answer this question as it triggered our safety guidelines.",
         "summary": "Query blocked by safety filter.",
