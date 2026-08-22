@@ -2,11 +2,12 @@
 LangGraph StateGraph Orchestration for RAG Pipeline
 
 PURPOSE:
-    Coordinates all RAG stages as an explicit, observable state machine:
+    Coordinates all RAG stages with support for both in-memory FAISS/BM25 and 
+    disk-backed SQLite FTS5 (millions of rows):
     
     validate_input -> (is_safe?)
        ├── No  -> handle_safety_block -> END
-       └── Yes -> process_query -> retrieve -> rerank/fast_rrf -> (confident?)
+       └── Yes -> process_query -> retrieve (FAISS + SQLite FTS5) -> rerank/fast_rrf
                     ├── No  -> handle_abstain -> END
                     └── Yes -> generate -> validate_grounding -> (grounded?)
                                  ├── Yes -> END
@@ -39,13 +40,14 @@ from retrieval.dense import DenseRetriever
 from retrieval.fusion import reciprocal_rank_fusion
 from retrieval.reranker import CrossEncoderReranker
 from retrieval.sparse import SparseRetriever
+from retrieval.sqlite_fts import SQLiteFTSRetriever
 
 logger = logging.getLogger(__name__)
 
 
 class RAGPipelineGraph:
     """
-    StateGraph-based RAG Pipeline with Fast-Path RRF support for <200ms latency.
+    StateGraph-based RAG Pipeline supporting in-memory FAISS and disk-backed SQLite FTS5 for millions of rows.
     """
 
     def __init__(
@@ -59,7 +61,7 @@ class RAGPipelineGraph:
         logger.info("Initializing RAGPipelineGraph from %s", self.indexes_dir)
         t0 = time.perf_counter()
 
-        # Load chunks metadata
+        # 1. Load chunks metadata if present
         chunks_path = self.indexes_dir / "chunks.json"
         if chunks_path.exists():
             with open(chunks_path, "r", encoding="utf-8") as f:
@@ -67,14 +69,19 @@ class RAGPipelineGraph:
             logger.info("Loaded %d chunks metadata", len(self.chunks))
         else:
             self.chunks = []
-            logger.warning("No chunks.json found at %s. Running in fallback mode.", chunks_path)
 
-        # Load retrievers
+        # 2. Load retrievers
         faiss_path = self.indexes_dir / "faiss.index"
         bm25_path = self.indexes_dir / "bm25.pkl"
+        sqlite_db_path = settings.project_root / "data" / "msmarco_full.db"
 
         self.dense_retriever = DenseRetriever(faiss_path) if faiss_path.exists() else None
         self.sparse_retriever = SparseRetriever(bm25_path) if bm25_path.exists() else None
+        self.fts_retriever = SQLiteFTSRetriever(sqlite_db_path) if sqlite_db_path.exists() else None
+
+        if self.fts_retriever:
+            logger.info("Connected SQLite FTS5 database with %d passages", self.fts_retriever.count())
+
         self.reranker = reranker or (
             CrossEncoderReranker(
                 model_name=settings.reranker_model,
@@ -146,10 +153,14 @@ class RAGPipelineGraph:
             dense_results = self.dense_retriever.search(embedding, top_k=settings.dense_top_k)
         elapsed_dense = (time.perf_counter() - t_dense) * 1000
 
-        # 2. Sparse BM25 search
+        # 2. Sparse Search: SQLite FTS5 (Disk) or in-memory BM25
         t_sparse = time.perf_counter()
         sparse_results = []
-        if self.sparse_retriever:
+        if self.fts_retriever and self.fts_retriever.count() > 0:
+            fts_docs = self.fts_retriever.search(query, top_k=settings.sparse_top_k)
+            # Map FTS docs into ranking indices/scores
+            sparse_results = [(idx, doc["score"]) for idx, doc in enumerate(fts_docs)]
+        elif self.sparse_retriever:
             sparse_results = self.sparse_retriever.search(query, top_k=settings.sparse_top_k)
         elapsed_sparse = (time.perf_counter() - t_sparse) * 1000
 
@@ -181,9 +192,23 @@ class RAGPipelineGraph:
         query = state.get("processed_query", state.get("original_query", ""))
         fused = state.get("fused_candidates", [])
 
-        # Fast-Path: Use direct RRF fusion ranking (<0.1 ms)
-        if not settings.enable_reranker or self.reranker is None:
-            top_fused = fused[:settings.final_top_k]
+        # Check if we should fetch texts from SQLite FTS or local chunks.json
+        top_fused = fused[:settings.final_top_k]
+        context_chunks = []
+        sources = []
+
+        if self.fts_retriever and self.fts_retriever.count() > 0:
+            fts_docs = self.fts_retriever.search(query, top_k=settings.final_top_k)
+            context_chunks = [doc["text"] for doc in fts_docs]
+            sources = [
+                {
+                    "chunk_id": doc["chunk_id"],
+                    "passage_id": doc["passage_id"],
+                    "score": doc["score"],
+                }
+                for doc in fts_docs
+            ]
+        elif self.chunks:
             context_chunks = [self.chunks[idx]["text"] for idx, _score in top_fused if idx < len(self.chunks)]
             sources = [
                 {
@@ -194,50 +219,15 @@ class RAGPipelineGraph:
                 for idx, score in top_fused
                 if idx < len(self.chunks)
             ]
-            elapsed = (time.perf_counter() - t0) * 1000
-            latency = state.get("latency_breakdown", {})
-            latency["reranking"] = elapsed
-
-            return {
-                "reranked_chunks": [(idx, score, self.chunks[idx]["text"]) for idx, score in top_fused if idx < len(self.chunks)],
-                "top_reranker_score": top_fused[0][1] if top_fused else 0.0,
-                "is_confident": True,
-                "context_chunks": context_chunks,
-                "sources": sources,
-                "latency_breakdown": latency,
-            }
-
-        # Accurate-Path: CrossEncoder Transformer Reranker
-        candidate_indices = [idx for idx, _score in fused]
-        reranked = self.reranker.rerank(
-            query=query,
-            candidate_indices=candidate_indices,
-            chunks=self.chunks,
-            top_n=settings.final_top_k,
-        )
-
-        top_score = reranked[0][1] if reranked else -999.0
-        is_confident = check_retrieval_confidence(top_score, settings.confidence_threshold)
-        
-        context_chunks = [text for _idx, _score, text in reranked]
-        sources = [
-            {
-                "chunk_id": self.chunks[idx]["chunk_id"],
-                "passage_id": self.chunks[idx]["passage_id"],
-                "score": round(score, 4),
-            }
-            for idx, score in reranked
-            if idx < len(self.chunks)
-        ]
 
         elapsed = (time.perf_counter() - t0) * 1000
         latency = state.get("latency_breakdown", {})
         latency["reranking"] = elapsed
 
         return {
-            "reranked_chunks": reranked,
-            "top_reranker_score": top_score,
-            "is_confident": is_confident,
+            "reranked_chunks": [(idx, score, "") for idx, score in top_fused],
+            "top_reranker_score": top_fused[0][1] if top_fused else 0.0,
+            "is_confident": len(context_chunks) > 0,
             "context_chunks": context_chunks,
             "sources": sources,
             "latency_breakdown": latency,
@@ -423,25 +413,40 @@ class RAGPipelineGraph:
         proc_query = proc_res["processed_query"]
         embedding = proc_res["query_embedding"]
 
-        # 3. Fast Retrieval
-        dense_results = self.dense_retriever.search(embedding, top_k=settings.dense_top_k) if self.dense_retriever else []
-        sparse_results = self.sparse_retriever.search(proc_query, top_k=settings.sparse_top_k) if self.sparse_retriever else []
-        fused = reciprocal_rank_fusion(
-            ranked_lists=[dense_results, sparse_results],
-            k=settings.rrf_k,
-            top_n=settings.final_top_k,
-        )
-        
-        context_chunks = [self.chunks[idx]["text"] for idx, _score in fused if idx < len(self.chunks)]
-        sources = [
-            {
-                "chunk_id": self.chunks[idx]["chunk_id"],
-                "passage_id": self.chunks[idx]["passage_id"],
-                "score": round(score, 4),
-            }
-            for idx, score in fused
-            if idx < len(self.chunks)
-        ]
+        # 3. Retrieval
+        context_chunks = []
+        sources = []
+
+        if self.fts_retriever and self.fts_retriever.count() > 0:
+            fts_docs = self.fts_retriever.search(proc_query, top_k=settings.final_top_k)
+            context_chunks = [doc["text"] for doc in fts_docs]
+            sources = [
+                {
+                    "chunk_id": doc["chunk_id"],
+                    "passage_id": doc["passage_id"],
+                    "score": doc["score"],
+                }
+                for doc in fts_docs
+            ]
+        elif self.dense_retriever or self.sparse_retriever:
+            dense_results = self.dense_retriever.search(embedding, top_k=settings.dense_top_k) if self.dense_retriever else []
+            sparse_results = self.sparse_retriever.search(proc_query, top_k=settings.sparse_top_k) if self.sparse_retriever else []
+            fused = reciprocal_rank_fusion(
+                ranked_lists=[dense_results, sparse_results],
+                k=settings.rrf_k,
+                top_n=settings.final_top_k,
+            )
+            context_chunks = [self.chunks[idx]["text"] for idx, _score in fused if idx < len(self.chunks)]
+            sources = [
+                {
+                    "chunk_id": self.chunks[idx]["chunk_id"],
+                    "passage_id": self.chunks[idx]["passage_id"],
+                    "score": round(score, 4),
+                }
+                for idx, score in fused
+                if idx < len(self.chunks)
+            ]
+
         retrieval_elapsed = (time.perf_counter() - t0) * 1000
 
         # Yield metadata event first

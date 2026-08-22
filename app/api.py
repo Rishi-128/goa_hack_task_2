@@ -3,6 +3,7 @@ FastAPI Route Definitions with Real-Time Token Streaming
 
 Endpoints:
     GET  /              -> Interactive Web Test UI (Real-Time Token Streaming + Voice Recording)
+    GET  /favicon.ico   -> Browser icon handler
     GET  /health        -> Service health status
     POST /query         -> Synchronous RAG query
     POST /query/stream  -> Streaming RAG query (Server-Sent Events)
@@ -72,6 +73,11 @@ class VoiceResponse(BaseModel):
 
 # ── HTML UI ───────────────────────────────────────────────────────────
 
+@router.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return HTMLResponse(content="", status_code=204)
+
+
 @router.get("/", response_class=HTMLResponse)
 def root():
     html_content = """<!DOCTYPE html>
@@ -80,6 +86,7 @@ def root():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Goa Hackathon 2026 — Real-Time Streaming Voice RAG</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎙️</text></svg>">
     <style>
         :root {
             --bg: #0b1120;
@@ -115,272 +122,217 @@ def root():
             margin-bottom: 1.5rem;
             box-shadow: 0 4px 20px rgba(0,0,0,0.4);
         }
-        .tab-bar {
+        .tab-nav {
             display: flex;
-            gap: 0.5rem;
-            margin-bottom: 1.25rem;
+            gap: 1rem;
+            margin-bottom: 1rem;
             border-bottom: 1px solid var(--border);
             padding-bottom: 0.5rem;
         }
         .tab-btn {
-            background: transparent;
+            background: none;
             border: none;
             color: var(--subtext);
-            padding: 0.5rem 1rem;
             font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
+            padding: 0.5rem 1rem;
             border-radius: 6px;
+            transition: all 0.2s ease;
         }
         .tab-btn.active {
-            background: rgba(56, 189, 248, 0.15);
             color: var(--accent);
+            background: rgba(56, 189, 248, 0.1);
         }
-        input, select, button {
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        textarea, input[type="text"] {
             width: 100%;
-            padding: 0.75rem;
-            margin-top: 0.5rem;
-            margin-bottom: 1rem;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: #0f172a;
-            color: var(--text);
             box-sizing: border-box;
+            background: #0f172a;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            padding: 0.75rem;
             font-size: 1rem;
+            margin-bottom: 1rem;
+            resize: vertical;
         }
         button.action-btn {
             background: var(--accent);
-            color: #0f172a;
-            font-weight: 700;
-            cursor: pointer;
+            color: #0b1120;
             border: none;
-            transition: all 0.2s;
-        }
-        button.action-btn:hover { opacity: 0.9; transform: translateY(-1px); }
-        .voice-controls {
-            display: flex;
-            gap: 1rem;
-            margin-top: 0.5rem;
-            margin-bottom: 1rem;
-        }
-        .record-btn {
-            flex: 1;
-            background: #e11d48;
-            color: white;
-            font-weight: 700;
-            border: none;
-            padding: 1rem;
             border-radius: 8px;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: bold;
             cursor: pointer;
-            display: flex;
+            transition: opacity 0.2s;
+            display: inline-flex;
             align-items: center;
-            justify-content: center;
             gap: 0.5rem;
         }
-        .record-btn.recording {
-            background: #9f1239;
-            animation: pulse 1.2s infinite;
+        button.action-btn:hover { opacity: 0.9; }
+        button.record-btn {
+            background: var(--accent-red);
+            color: white;
+        }
+        button.record-btn.recording {
+            animation: pulse 1.5s infinite;
         }
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.6; }
-            100% { opacity: 1; }
+            0% { transform: scale(1); }
+            50% { transform: scale(1.04); }
+            100% { transform: scale(1); }
         }
-        .badge {
-            display: inline-block;
-            padding: 0.25rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.8rem;
-            font-weight: bold;
-            background: rgba(56, 189, 248, 0.2);
-            color: var(--accent);
-            margin-left: 0.4rem;
-        }
-        .badge-green {
-            background: rgba(52, 211, 153, 0.2);
-            color: var(--accent-green);
-        }
-        .badge-purple {
-            background: rgba(192, 132, 252, 0.2);
-            color: var(--accent-purple);
-        }
-        .result-box {
-            display: none;
-            background: #090d16;
+        .response-box {
+            background: #0f172a;
             border: 1px solid var(--border);
             border-radius: 8px;
             padding: 1.25rem;
             margin-top: 1rem;
+            min-height: 80px;
+            white-space: pre-wrap;
+            font-size: 1.05rem;
+            line-height: 1.6;
         }
-        .stream-cursor {
+        .metrics-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .metric-badge {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.4rem 0.75rem;
+            font-size: 0.85rem;
+        }
+        .metric-badge span {
+            font-weight: bold;
+            color: var(--accent-green);
+        }
+        .streaming-cursor {
             display: inline-block;
             width: 8px;
-            height: 1.1rem;
+            height: 16px;
             background: var(--accent);
+            margin-left: 4px;
             vertical-align: middle;
-            animation: blink 0.8s infinite;
+            animation: blink 1s infinite;
         }
         @keyframes blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0; }
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
         }
-        .source-tag {
-            background: #1e293b;
-            border: 1px solid #334155;
-            padding: 0.35rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.8rem;
-            margin-right: 0.5rem;
-            display: inline-block;
-            margin-top: 0.5rem;
-        }
-        .links a {
-            color: var(--accent);
-            text-decoration: none;
-            margin-right: 1.5rem;
-            font-size: 0.9rem;
-        }
-        .links a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎙️ Real-Time Streaming Voice RAG</h1>
-        <p class="subtitle">Goa Hackathon 2026 — Task 2 | Sarvam AI STT + FAISS + BM25 + Real-Time Token Streaming</p>
-        
-        <div class="links" style="margin-bottom: 1rem;">
-            <a href="/docs" target="_blank">📖 OpenAPI Docs (/docs)</a>
-            <a href="/health" target="_blank">🩺 Health (/health)</a>
+        <h1>🎙️ Goa Hackathon 2026 — Real-Time Streaming Voice RAG</h1>
+        <p class="subtitle">Sub-200ms RAG | Sarvam AI STT (saaras:v3) | SQLite FTS5 (23M+ Passages) | Groq (allam-2-7b)</p>
+
+        <div class="card">
+            <div class="tab-nav">
+                <button class="tab-btn active" onclick="switchTab('voice-tab')">🎙️ Voice Input (Live Recording)</button>
+                <button class="tab-btn" onclick="switchTab('text-tab')">📝 Text Query (Streaming)</button>
+            </div>
+
+            <!-- Voice Tab -->
+            <div id="voice-tab" class="tab-content active">
+                <p style="color: var(--subtext); font-size: 0.9rem; margin-top:0;">Click to record your voice. Your speech will be transcribed via Sarvam AI and streamed in real-time.</p>
+                <button id="record-btn" class="action-btn record-btn" onclick="toggleRecording()">
+                    <span id="record-icon">🎤</span> <span id="record-text">Start Recording</span>
+                </button>
+                <span id="recording-timer" style="margin-left: 1rem; color: var(--accent-red); font-weight: bold; display: none;">🔴 Recording...</span>
+            </div>
+
+            <!-- Text Tab -->
+            <div id="text-tab" class="tab-content">
+                <textarea id="text-query" rows="2" placeholder="Ask any question (e.g. 'What is a corporation?', 'symptoms of borderline personality disorder')...">What is a corporation?</textarea>
+                <button class="action-btn" onclick="sendTextQuery()">⚡ Stream Answer</button>
+            </div>
         </div>
 
         <div class="card">
-            <div class="tab-bar">
-                <button class="tab-btn active" id="tabVoice" onclick="switchTab('voice')">🎙️ Voice Input (Streaming)</button>
-                <button class="tab-btn" id="tabText" onclick="switchTab('text')">📝 Text Query (Streaming)</button>
+            <h3 style="margin-top:0; color: var(--text); font-size: 1.1rem;">Response Stream:</h3>
+            <div id="transcript-container" style="display: none; margin-bottom: 0.75rem; color: var(--accent-purple); font-size: 0.95rem;">
+                <strong>Transcribed Speech:</strong> <span id="transcript-text"></span>
+            </div>
+            <div id="response-box" class="response-box">
+                <span id="response-text" style="color: var(--subtext);">Waiting for input...</span>
+                <span id="cursor" class="streaming-cursor" style="display:none;"></span>
             </div>
 
-            <!-- Voice Panel -->
-            <div id="panelVoice">
-                <p style="color: var(--subtext); margin-top: 0;">Speak into your microphone or upload audio. Transcribes via <strong>Sarvam AI</strong> and streams answer tokens in real-time:</p>
-                
-                <div class="voice-controls">
-                    <button id="btnRecord" class="record-btn" onclick="toggleRecording()">
-                        <span id="recordIcon">🔴</span> <span id="recordText">Start Recording</span>
-                    </button>
-                </div>
-                <div id="recordingTimer" style="display: none; color: var(--accent-red); margin-bottom: 1rem; font-weight: 600;">
-                    🎙️ Recording... Speak into your microphone, then click Stop.
-                </div>
-
-                <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--border);">
-                    <label for="audioFile">Or upload audio file (.wav, .mp3):</label>
-                    <input type="file" id="audioFile" accept="audio/*">
-                    <button class="action-btn" onclick="uploadAudioFile()">📤 Stream Uploaded Audio</button>
-                </div>
+            <div id="metrics-container" class="metrics-grid" style="display: none;">
+                <div class="metric-badge">STT Latency: <span id="metric-stt">-</span></div>
+                <div class="metric-badge">Retrieval: <span id="metric-retrieval">-</span></div>
+                <div class="metric-badge">Time to First Token (TTFT): <span id="metric-ttft">-</span></div>
+                <div class="metric-badge">Total Pipeline Latency: <span id="metric-total">-</span></div>
             </div>
 
-            <!-- Text Panel -->
-            <div id="panelText" style="display: none;">
-                <label for="queryInput">Query:</label>
-                <input type="text" id="queryInput" placeholder="e.g. What is a corporation?" value="What is a corporation?">
-                
-                <label for="modeSelect">Retrieval Mode:</label>
-                <select id="modeSelect">
-                    <option value="normal">Normal (Fast RRF)</option>
-                    <option value="query_rewrite">Force Rewrite</option>
-                    <option value="hyde">HyDE</option>
-                </select>
-                
-                <button class="action-btn" onclick="submitStreamingTextQuery()">⚡ Stream Answer Tokens</button>
-            </div>
-
-            <!-- Live Stream Result Box -->
-            <div id="resultBox" class="result-box">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <strong>Output:</strong>
-                    <div id="latencyBadges"></div>
-                </div>
-
-                <div id="transcriptSection" style="display: none; margin-bottom: 0.75rem; padding: 0.5rem 0.75rem; background: #1e293b; border-radius: 6px;">
-                    <strong style="color: var(--accent);">🎙️ Sarvam Transcript:</strong>
-                    <span id="transcriptText" style="margin-left: 0.5rem; color: #fff;"></span>
-                </div>
-
-                <div>
-                    <strong>Answer:</strong>
-                    <p id="answerContainer" style="margin-top: 0.5rem; line-height: 1.5; font-size: 1.05rem;">
-                        <span id="answerText"></span><span id="cursor" class="stream-cursor" style="display: none;"></span>
-                    </p>
-                </div>
-
-                <div id="sourcesContainer" style="margin-top: 0.75rem;"></div>
+            <div id="sources-container" style="display: none; margin-top: 1rem; font-size: 0.85rem; color: var(--subtext);">
+                <strong>Retrieved Grounding Sources:</strong>
+                <ul id="sources-list" style="margin: 0.5rem 0 0 1.25rem; padding: 0;"></ul>
             </div>
         </div>
     </div>
 
     <script>
-        let mediaRecorder = null;
+        let mediaRecorder;
         let audioChunks = [];
         let isRecording = false;
 
-        function switchTab(tab) {
-            document.getElementById('tabVoice').classList.toggle('active', tab === 'voice');
-            document.getElementById('tabText').classList.toggle('active', tab === 'text');
-            document.getElementById('panelVoice').style.display = tab === 'voice' ? 'block' : 'none';
-            document.getElementById('panelText').style.display = tab === 'text' ? 'block' : 'none';
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(tabId).classList.add('active');
         }
 
         async function toggleRecording() {
             if (!isRecording) {
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
                     audioChunks = [];
-                    mediaRecorder = new MediaRecorder(stream);
-                    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-                    mediaRecorder.onstop = async () => {
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                        await streamAudio(audioBlob);
+
+                    mediaRecorder.ondataavailable = e => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
                     };
+
+                    mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        await streamVoice(audioBlob);
+                    };
+
                     mediaRecorder.start();
                     isRecording = true;
-                    document.getElementById('recordIcon').innerText = '⏹️';
-                    document.getElementById('recordText').innerText = 'Stop & Stream Answer';
-                    document.getElementById('btnRecord').classList.add('recording');
-                    document.getElementById('recordingTimer').style.display = 'block';
+                    document.getElementById('record-btn').classList.add('recording');
+                    document.getElementById('record-text').innerText = 'Stop & Stream Answer';
+                    document.getElementById('recording-timer').style.display = 'inline';
                 } catch (err) {
-                    alert('Microphone access denied: ' + err.message);
+                    alert('Microphone access denied or not available: ' + err.message);
                 }
             } else {
                 mediaRecorder.stop();
                 isRecording = false;
-                document.getElementById('recordIcon').innerText = '🔴';
-                document.getElementById('recordText').innerText = 'Start Recording';
-                document.getElementById('btnRecord').classList.remove('recording');
-                document.getElementById('recordingTimer').style.display = 'none';
+                document.getElementById('record-btn').classList.remove('recording');
+                document.getElementById('record-text').innerText = 'Start Recording';
+                document.getElementById('recording-timer').style.display = 'none';
             }
         }
 
-        async function uploadAudioFile() {
-            const fileInput = document.getElementById('audioFile');
-            if (!fileInput.files || fileInput.files.length === 0) {
-                alert('Please select an audio file first.');
-                return;
-            }
-            await streamAudio(fileInput.files[0]);
-        }
-
-        async function streamAudio(blob) {
-            const resBox = document.getElementById('resultBox');
-            resBox.style.display = 'block';
-            document.getElementById('transcriptSection').style.display = 'none';
-            document.getElementById('answerText').innerText = '';
+        async function streamVoice(audioBlob) {
+            resetUI();
+            document.getElementById('response-text').innerText = '';
             document.getElementById('cursor').style.display = 'inline-block';
-            document.getElementById('sourcesContainer').innerHTML = '';
-            document.getElementById('latencyBadges').innerHTML = '<span class="badge">🎙️ Transcribing with Sarvam...</span>';
 
             const formData = new FormData();
-            formData.append('file', blob, 'audio.wav');
-            formData.append('query_mode', 'normal');
+            formData.append('audio', audioBlob, 'speech.webm');
+            formData.append('language_code', 'en-IN');
 
             try {
                 const response = await fetch('/voice/stream', {
@@ -388,122 +340,106 @@ def root():
                     body: formData
                 });
 
-                if (!response.ok) {
-                    const errJson = await response.json().catch(() => ({}));
-                    throw new Error(errJson.detail || 'Server returned status ' + response.status);
-                }
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\\n');
-                    buffer = lines.pop();
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) continue;
-                        const data = JSON.parse(line.slice(6));
-
-                        if (data.type === 'stt') {
-                            document.getElementById('transcriptSection').style.display = 'block';
-                            document.getElementById('transcriptText').innerText = data.transcript;
-                            document.getElementById('latencyBadges').innerHTML = 
-                                `<span class="badge badge-green">STT: ${data.stt_latency_ms} ms</span> ` +
-                                `<span class="badge badge-purple">Retrieving...</span>`;
-                        } else if (data.type === 'metadata') {
-                            renderSources(data.sources);
-                        } else if (data.type === 'token') {
-                            document.getElementById('answerText').innerText += data.token;
-                            if (data.ttft_ms) {
-                                document.getElementById('latencyBadges').innerHTML += 
-                                    `<span class="badge badge-purple">TTFT: ${data.ttft_ms} ms ⚡</span>`;
-                            }
-                        } else if (data.type === 'done') {
-                            document.getElementById('cursor').style.display = 'none';
-                            document.getElementById('latencyBadges').innerHTML += 
-                                `<span class="badge">Total: ${data.total_voice_latency_ms} ms</span>`;
-                        }
-                    }
-                }
+                await readSSE(response);
             } catch (err) {
-                document.getElementById('answerText').innerText = 'Error: ' + err.message;
+                document.getElementById('response-text').innerText = 'Error: ' + err.message;
                 document.getElementById('cursor').style.display = 'none';
             }
         }
 
-        async function submitStreamingTextQuery() {
-            const query = document.getElementById('queryInput').value.trim();
-            const mode = document.getElementById('modeSelect').value;
+        async function sendTextQuery() {
+            const query = document.getElementById('text-query').value.trim();
             if (!query) return;
 
-            const resBox = document.getElementById('resultBox');
-            resBox.style.display = 'block';
-            document.getElementById('transcriptSection').style.display = 'none';
-            document.getElementById('answerText').innerText = '';
+            resetUI();
+            document.getElementById('response-text').innerText = '';
             document.getElementById('cursor').style.display = 'inline-block';
-            document.getElementById('sourcesContainer').innerHTML = '';
-            document.getElementById('latencyBadges').innerHTML = '<span class="badge">Retrieving...</span>';
 
             try {
                 const response = await fetch('/query/stream', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query: query, query_mode: mode, conversation_history: []})
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query, query_mode: 'normal' })
                 });
 
-                if (!response.ok) {
-                    const errJson = await response.json().catch(() => ({}));
-                    throw new Error(errJson.detail || 'Server returned status ' + response.status);
-                }
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\\n');
-                    buffer = lines.pop();
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) continue;
-                        const data = JSON.parse(line.slice(6));
-
-                        if (data.type === 'metadata') {
-                            document.getElementById('latencyBadges').innerHTML = 
-                                `<span class="badge badge-green">Retrieval: ${data.retrieval_latency_ms} ms</span>`;
-                            renderSources(data.sources);
-                        } else if (data.type === 'token') {
-                            document.getElementById('answerText').innerText += data.token;
-                            if (data.ttft_ms) {
-                                document.getElementById('latencyBadges').innerHTML += 
-                                    `<span class="badge badge-purple">TTFT: ${data.ttft_ms} ms ⚡</span>`;
-                            }
-                        } else if (data.type === 'done') {
-                            document.getElementById('cursor').style.display = 'none';
-                            document.getElementById('latencyBadges').innerHTML += 
-                                `<span class="badge">Total: ${data.total_latency_ms} ms</span>`;
-                        }
-                    }
-                }
+                await readSSE(response);
             } catch (err) {
-                document.getElementById('answerText').innerText = 'Error: ' + err.message;
+                document.getElementById('response-text').innerText = 'Error: ' + err.message;
                 document.getElementById('cursor').style.display = 'none';
             }
         }
 
-        function renderSources(sources) {
-            const sourcesDiv = document.getElementById('sourcesContainer');
-            if (sources && sources.length > 0) {
-                sourcesDiv.innerHTML = '<strong>Sources:</strong><br/>' + 
-                    sources.map(s => `<span class="source-tag">📄 ${s.chunk_id}</span>`).join('');
+        async function readSSE(response) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const nl = String.fromCharCode(10);
+                const lines = buffer.split(nl);
+                buffer = lines.pop(); // keep last incomplete chunk
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith('data:')) {
+                        const jsonStr = trimmed.substring(5).trim();
+                        if (!jsonStr) continue;
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            handleSSEEvent(data);
+                        } catch (e) {
+                            console.error('SSE JSON parse error:', e, jsonStr);
+                        }
+                    }
+                }
             }
+            document.getElementById('cursor').style.display = 'none';
+        }
+
+        function handleSSEEvent(data) {
+            if (data.type === 'metadata') {
+                if (data.transcript) {
+                    document.getElementById('transcript-container').style.display = 'block';
+                    document.getElementById('transcript-text').innerText = `"${data.transcript}"`;
+                }
+                document.getElementById('metrics-container').style.display = 'flex';
+                if (data.stt_latency_ms) {
+                    document.getElementById('metric-stt').innerText = `${data.stt_latency_ms.toFixed(1)} ms`;
+                }
+                document.getElementById('metric-retrieval').innerText = `${data.retrieval_latency_ms.toFixed(1)} ms`;
+
+                if (data.sources && data.sources.length > 0) {
+                    const list = document.getElementById('sources-list');
+                    list.innerHTML = '';
+                    data.sources.forEach(s => {
+                        const li = document.createElement('li');
+                        li.innerText = `[${s.passage_id || s.chunk_id}] (Score: ${s.score})`;
+                        list.appendChild(li);
+                    });
+                    document.getElementById('sources-container').style.display = 'block';
+                }
+            } else if (data.type === 'token') {
+                document.getElementById('response-text').innerText += data.token;
+                if (data.ttft_ms) {
+                    document.getElementById('metric-ttft').innerText = `${data.ttft_ms.toFixed(1)} ms ⚡`;
+                }
+            } else if (data.type === 'done') {
+                document.getElementById('cursor').style.display = 'none';
+                document.getElementById('metric-total').innerText = `${data.total_latency_ms.toFixed(1)} ms`;
+            }
+        }
+
+        function resetUI() {
+            document.getElementById('transcript-container').style.display = 'none';
+            document.getElementById('sources-container').style.display = 'none';
+            document.getElementById('metrics-container').style.display = 'none';
+            document.getElementById('metric-stt').innerText = '-';
+            document.getElementById('metric-ttft').innerText = '-';
+            document.getElementById('metric-total').innerText = '-';
         }
     </script>
 </body>
@@ -511,46 +447,61 @@ def root():
     return HTMLResponse(content=html_content)
 
 
+# ── API Endpoints ─────────────────────────────────────────────────────
+
 @router.get("/health")
 def health_check():
+    """Health check returning database connection and retriever status."""
+    if _pipeline is None:
+        return {"status": "starting", "pipeline_ready": False}
+
+    fts_count = _pipeline.fts_retriever.count() if _pipeline.fts_retriever else 0
     return {
         "status": "healthy",
-        "pipeline_loaded": _pipeline is not None,
-        "indexed_chunks": len(_pipeline.chunks) if _pipeline else 0,
+        "pipeline_ready": True,
+        "sqlite_fts_passages": fts_count,
+        "in_memory_chunks": len(_pipeline.chunks),
+        "dense_retriever": _pipeline.dense_retriever is not None,
     }
 
 
 @router.post("/query", response_model=QueryResponse)
 def query_rag(req: QueryRequest):
+    """Synchronous JSON RAG Query endpoint."""
     if _pipeline is None:
-        raise HTTPException(status_code=503, detail="RAG Pipeline not yet initialized.")
+        raise HTTPException(status_code=503, detail="Pipeline not initialized")
 
-    try:
-        res = _pipeline.run(
-            query=req.query,
-            conversation_history=req.conversation_history,
-            query_mode=req.query_mode,
-        )
+    t0 = time.perf_counter()
+    result = _pipeline.run(
+        query=req.query,
+        conversation_history=req.conversation_history,
+        query_mode=req.query_mode,
+    )
+    elapsed = (time.perf_counter() - t0) * 1000
 
-        return QueryResponse(
-            answer=res["answer"],
-            summary=res["summary"],
-            grounded=res["grounded"],
-            sources=[SourceCitation(**s) for s in res.get("sources", [])],
-            latency_ms=res["total_latency_ms"],
-        )
-    except Exception as e:
-        logger.error("Error processing query: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    return QueryResponse(
+        answer=result.get("answer", ""),
+        summary=result.get("summary", ""),
+        grounded=result.get("grounded", False),
+        sources=[
+            SourceCitation(
+                chunk_id=s.get("chunk_id", ""),
+                passage_id=s.get("passage_id", ""),
+                score=s.get("score", 0.0),
+            )
+            for s in result.get("sources", [])
+        ],
+        latency_ms=round(elapsed, 2),
+    )
 
 
 @router.post("/query/stream")
 def query_rag_stream(req: QueryRequest):
-    """Server-Sent Events (SSE) real-time streaming endpoint for text queries."""
+    """Server-Sent Events (SSE) Streaming RAG Query endpoint."""
     if _pipeline is None:
-        raise HTTPException(status_code=503, detail="RAG Pipeline not yet initialized.")
+        raise HTTPException(status_code=503, detail="Pipeline not initialized")
 
-    def event_generator():
+    def event_stream():
         for event in _pipeline.run_stream(
             query=req.query,
             conversation_history=req.conversation_history,
@@ -558,79 +509,91 @@ def query_rag_stream(req: QueryRequest):
         ):
             yield f"data: {json.dumps(event)}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/voice", response_model=VoiceResponse)
-async def voice_rag(
-    file: UploadFile = File(..., description="Audio file (WAV, MP3, etc.)"),
-    query_mode: str = Form("normal"),
+async def query_voice(
+    audio: UploadFile = File(..., description="Audio recording file (WAV/WEBM/MP3)"),
+    language_code: str = Form("en-IN"),
 ):
+    """Synchronous Voice Query: Sarvam STT -> RAG."""
     if _pipeline is None or _stt is None:
-        raise HTTPException(status_code=503, detail="Services not yet initialized.")
+        raise HTTPException(status_code=503, detail="Voice pipeline not initialized")
 
-    t0_voice = time.perf_counter()
-    
+    t0 = time.perf_counter()
+    audio_bytes = await audio.read()
+
     try:
-        audio_bytes = await file.read()
-        if not audio_bytes:
-            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
-
-        # 1. STT (Sarvam AI saaras:v3)
-        transcript, stt_latency_ms = _stt.transcribe(audio_bytes)
-
-        # 2. RAG Pipeline
-        rag_res = _pipeline.run(query=transcript, query_mode=query_mode)
-        
-        total_voice_ms = (time.perf_counter() - t0_voice) * 1000
-
-        return VoiceResponse(
-            transcript=transcript,
-            answer=rag_res["answer"],
-            summary=rag_res["summary"],
-            grounded=rag_res["grounded"],
-            sources=[SourceCitation(**s) for s in rag_res.get("sources", [])],
-            stt_latency_ms=round(stt_latency_ms, 2),
-            rag_latency_ms=rag_res["total_latency_ms"],
-            total_voice_latency_ms=round(total_voice_ms, 2),
-        )
-    except ValueError as val_err:
-        raise HTTPException(status_code=400, detail=str(val_err))
+        transcript, stt_latency = _stt.transcribe(audio_bytes, language_code=language_code)
     except Exception as e:
-        logger.error("Error in voice RAG pipeline: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Voice transcription failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Voice transcription failed: {e}")
+
+    rag_res = _pipeline.run(query=transcript)
+    total_latency = (time.perf_counter() - t0) * 1000
+
+    return VoiceResponse(
+        transcript=transcript,
+        answer=rag_res.get("answer", ""),
+        summary=rag_res.get("summary", ""),
+        grounded=rag_res.get("grounded", False),
+        sources=[
+            SourceCitation(
+                chunk_id=s.get("chunk_id", ""),
+                passage_id=s.get("passage_id", ""),
+                score=s.get("score", 0.0),
+            )
+            for s in rag_res.get("sources", [])
+        ],
+        stt_latency_ms=round(stt_latency, 2),
+        rag_latency_ms=rag_res.get("total_latency_ms", 0.0),
+        total_voice_latency_ms=round(total_latency, 2),
+    )
 
 
 @router.post("/voice/stream")
-async def voice_rag_stream(
-    file: UploadFile = File(..., description="Audio file (WAV, MP3, etc.)"),
-    query_mode: str = Form("normal"),
+async def query_voice_stream(
+    audio: UploadFile = File(..., description="Audio recording file (WAV/WEBM/MP3)"),
+    language_code: str = Form("en-IN"),
 ):
-    """Server-Sent Events (SSE) real-time streaming endpoint for voice queries."""
+    """Streaming Voice Query: Sarvam STT -> Streaming RAG (Server-Sent Events)."""
     if _pipeline is None or _stt is None:
-        raise HTTPException(status_code=503, detail="Services not yet initialized.")
+        raise HTTPException(status_code=503, detail="Voice pipeline not initialized")
 
-    audio_bytes = await file.read()
-    if not audio_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+    t0 = time.perf_counter()
+    audio_bytes = await audio.read()
 
-    t0_voice = time.perf_counter()
+    try:
+        transcript, stt_latency = _stt.transcribe(audio_bytes, language_code=language_code)
+    except Exception as e:
+        logger.error("Voice transcription failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Voice transcription failed: {e}")
 
-    def event_generator():
-        try:
-            transcript, stt_latency_ms = _stt.transcribe(audio_bytes)
-        except Exception as e:
-            logger.error("Voice transcription failed: %s", e)
-            yield f"data: {json.dumps({'type': 'token', 'token': f'Transcription Error: {e}', 'ttft_ms': 0.1})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'total_voice_latency_ms': 0.0})}\n\n"
-            return
-
-        yield f"data: {json.dumps({'type': 'stt', 'transcript': transcript, 'stt_latency_ms': round(stt_latency_ms, 2)})}\n\n"
-        
-        for event in _pipeline.run_stream(query=transcript, query_mode=query_mode):
-            if event.get("type") == "done":
-                total_voice_ms = (time.perf_counter() - t0_voice) * 1000
-                event["total_voice_latency_ms"] = round(total_voice_ms, 2)
+    def event_stream():
+        # First yield the STT transcript and metadata
+        first_event = True
+        for event in _pipeline.run_stream(query=transcript):
+            if first_event and event.get("type") == "metadata":
+                event["transcript"] = transcript
+                event["stt_latency_ms"] = round(stt_latency, 2)
+                first_event = False
             yield f"data: {json.dumps(event)}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
