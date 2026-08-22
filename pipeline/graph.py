@@ -410,7 +410,8 @@ class RAGPipelineGraph:
         # 1. Validation
         is_safe, error_msg = check_input_safety(query)
         if not is_safe:
-            yield {"type": "token", "token": "Query blocked by safety filter.", "ttft_ms": 0.1}
+            msg = "I didn't quite catch that. Could you please try again?" if error_msg == "Empty query" else "Query blocked by safety filter."
+            yield {"type": "token", "token": msg, "ttft_ms": 0.1}
             yield {"type": "done", "total_latency_ms": (time.perf_counter() - t0) * 1000}
             return
 
